@@ -1,3 +1,7 @@
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+
+import { runCodexRebaseProviderSmoke } from "../src/context-rebase-provider-smoke.js";
 import { runCodexRebaseMockSmoke } from "../src/context-rebase-smoke.js";
 
 function optionValue(name: string): string | undefined {
@@ -11,14 +15,49 @@ function printHelp(): void {
     "Usage: npm run smoke:context-rebase:codex -- [options]",
     "",
     "Options:",
-    "  --mode=mock          Run the offline scripted Responses smoke (default).",
-    "  --model=<name>       Non-sensitive model label recorded in evidence.",
-    "  --output-dir=<path>  Directory for the sanitized evidence JSON.",
-    "  --help               Show this help.",
+    "  --mode=mock|provider   Run the offline smoke (default) or a real provider smoke.",
+    "  --model=<name>         Model label; provider default is gpt-5.4-mini.",
+    "  --base-url=<url>       Non-secret provider base URL; defaults to OPENAI_BASE_URL.",
+    "  --credentials-file=<path>  Provider-only env file; defaults to <initial cwd>/.env.",
+    "  --output-dir=<path>    Directory for the sanitized evidence JSON.",
+    "  --help                 Show this help.",
     "",
-    "This offline command never reads an API key and never persists raw prompts,",
+    "Mock mode never reads an API key. Provider mode reads OPENAI_API_KEY only from",
+    "the process environment or ignored env file. Neither mode persists raw prompts,",
     "headers, response ids, or encrypted reasoning payloads in its evidence file.",
   ].join("\n"));
+}
+
+function envValue(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.length >= 2 && (
+    (trimmed.startsWith('"') && trimmed.endsWith('"'))
+    || (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  )) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+async function loadProviderEnvFile(path: string): Promise<boolean> {
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  for (const rawLine of text.replace(/^\uFEFF/, "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const separator = line.indexOf("=");
+    if (separator <= 0) continue;
+    const name = line.slice(0, separator).trim();
+    if (name !== "OPENAI_API_KEY" && name !== "OPENAI_BASE_URL") continue;
+    if (process.env[name]?.trim()) continue;
+    process.env[name] = envValue(line.slice(separator + 1));
+  }
+  return true;
 }
 
 async function main(): Promise<void> {
@@ -27,8 +66,40 @@ async function main(): Promise<void> {
     return;
   }
   const mode = optionValue("mode") ?? "mock";
+  if (mode === "provider") {
+    const initialCwd = process.env.INIT_CWD?.trim() || process.cwd();
+    const envFile = resolve(optionValue("credentials-file") ?? resolve(initialCwd, ".env"));
+    await loadProviderEnvFile(envFile);
+    const baseUrl = optionValue("base-url")?.trim() || process.env.OPENAI_BASE_URL?.trim();
+    if (!baseUrl) {
+      throw new Error("Provider smoke requires OPENAI_BASE_URL or --base-url");
+    }
+    const result = await runCodexRebaseProviderSmoke({
+      baseUrl,
+      model: optionValue("model"),
+      outputDir: optionValue("output-dir"),
+    });
+    console.log(JSON.stringify({
+      ok: true,
+      mode: result.evidence.mode,
+      provider: result.evidence.provider,
+      endpointHost: result.evidence.endpointHost,
+      model: result.evidence.model,
+      artifactPath: result.artifactPath,
+      artifactSha256: result.artifactSha256,
+      encryptedReasoningPresent: result.evidence.capability.encryptedReasoningPresent,
+      rebaseCommitted: result.evidence.rebase.committed,
+      sentinel: result.evidence.rebase.sentinel,
+      continuationTurns: result.evidence.rebase.responseChain.continuationTurns,
+      restartPreserved: result.evidence.rebase.responseChain.restartPreserved,
+      observedBreakEvenTurn: result.evidence.usage.observedBreakEvenTurn ?? null,
+      projectedBreakEvenTurn: result.evidence.usage.projectedBreakEvenTurn ?? null,
+      observedSavedInputTokens: result.evidence.usage.observedSavedInputTokens,
+    }, null, 2));
+    return;
+  }
   if (mode !== "mock") {
-    throw new Error("Only --mode=mock is available in the offline smoke command");
+    throw new Error("Smoke mode must be --mode=mock or --mode=provider");
   }
   const result = await runCodexRebaseMockSmoke({
     model: optionValue("model"),

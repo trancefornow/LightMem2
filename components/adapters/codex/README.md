@@ -159,6 +159,53 @@ The command never reads an API key. Its evidence is explicitly marked
 reasoning payloads. It does not replace real-provider validation or
 provider-observed usage and break-even evidence.
 
+### Real-provider context-rebase smoke
+
+The same entry point has an opt-in provider mode. It requires a provider that
+implements the OpenAI-compatible `/v1/responses` endpoint, returns
+`reasoning.encrypted_content` for stateless responses, and supports stored
+response chains through `previous_response_id`.
+
+Keep credentials in the process environment or an ignored local file. For a
+source checkout, a root `.env` file can contain:
+
+```dotenv
+OPENAI_API_KEY=<provider key>
+OPENAI_BASE_URL=https://provider.example/v1
+```
+
+Then run:
+
+```bash
+npm --prefix components/adapters/codex run smoke:context-rebase:codex -- \
+  --mode=provider \
+  --model=gpt-5.4-mini
+```
+
+When invoked through `npm --prefix`, provider mode loads only
+`OPENAI_API_KEY` and `OPENAI_BASE_URL` from `<initial cwd>/.env` if the
+variables are not already present. Use
+`--credentials-file=/path/to/ignored.env` to select another file. There is no
+CLI option for passing an API key directly.
+
+Provider mode first constructs an exact stateless encrypted-reasoning and
+function-call/output history, uses it to create a stored response root, then
+runs a control chain and a rebase chain with five continuation turns. The
+rebase chain restarts the local proxy before turn three. Provider-reported
+input, cached-input, output, and total token counts are compared turn by turn
+to report observed and projected break-even.
+
+The provider evidence artifact contains only endpoint host, model, booleans,
+counts, lengths, digests, and usage totals. It omits raw prompts, headers,
+response IDs, and encrypted reasoning payloads. Temporary journals and trace
+state are removed after each scenario. HTTP 429 and 5xx responses receive at
+most two bounded smoke-client retries; schema and authentication failures are
+not retried.
+
+If the provider rejects `previous_response_id`, the command stops before the
+real rebase. Stateless encrypted reasoning alone is not sufficient to claim a
+successful response-chain smoke.
+
 Context-history journal writers use a session-scoped cross-process lock. A
 successful append is one complete JSONL record followed by `sync`; concurrent
 request and response writers cannot interleave their records. If an external
